@@ -46,6 +46,7 @@ fn rfc_2822_invalid_udt(#[case] udt: UtcDateTime, #[case] component: &str) {
 #[case(datetime!(1994-11-06 08:49:37 UTC), "Sun, 06 Nov 1994 08:49:37 GMT")]
 #[case(datetime!(1994-11-06 03:49:37 -5), "Sun, 06 Nov 1994 08:49:37 GMT")]
 #[case(datetime!(1994-11-06 13:49:37 +5), "Sun, 06 Nov 1994 08:49:37 GMT")]
+#[case(datetime!(1994-11-05 23:49:37 -9), "Sun, 06 Nov 1994 08:49:37 GMT")]
 #[case(datetime!(1994-11-06 08:49:38 +0:00:01), "Sun, 06 Nov 1994 08:49:37 GMT")]
 fn rfc_6265_odt(#[case] dt: OffsetDateTime, #[case] expected: &str) {
     assert_eq!(dt.format(&Rfc6265).ok().as_deref(), Some(expected));

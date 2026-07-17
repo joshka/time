@@ -152,6 +152,7 @@ fn rfc_2822_err_component_range(#[case] input: &str, #[case] conditional: bool) 
 #[case("Sun, 06 Nov 70 08:49:37 GMT", datetime!(1970-11-06 08:49:37 UTC))]
 #[case("Sun, 06 Nov 99 08:49:37 GMT", datetime!(1999-11-06 08:49:37 UTC))]
 #[case("Sun, 06 Nov 00 08:49:37 GMT", datetime!(2000-11-06 08:49:37 UTC))]
+#[case("Mon, 01 Jan 1601 00:00:00 GMT", datetime!(1601-01-01 00:00:00 UTC))]
 #[case("Sun, 06 Nov 0000 08:49:37 GMT", datetime!(2000-11-06 08:49:37 UTC))]
 #[case("Sun, 06 Nov 0069 08:49:37 GMT", datetime!(2069-11-06 08:49:37 UTC))]
 #[case("Sun, 06 Nov 0099 08:49:37 GMT", datetime!(1999-11-06 08:49:37 UTC))]
@@ -162,6 +163,21 @@ fn rfc_6265_odt(#[case] input: &str, #[case] expected: OffsetDateTime) {
     assert_eq!(OffsetDateTime::parse(input, &Rfc6265).ok(), Some(expected));
 }
 
+// The day and each hms-time field are 1*2 DIGIT. Cover the accepted lower
+// width, zero-padded width, and upper valid value before the range checks.
+#[rstest]
+#[case("1 Jan 1994 1:2:3", datetime!(1994-01-01 01:02:03 UTC))]
+#[case("01 Jan 1994 01:02:03", datetime!(1994-01-01 01:02:03 UTC))]
+#[case("31 Dec 1994 23:59:59", datetime!(1994-12-31 23:59:59 UTC))]
+fn rfc_6265_one_or_two_digit_day_and_time_fields(
+    #[case] input: &str,
+    #[case] expected: OffsetDateTime,
+) {
+    assert_eq!(OffsetDateTime::parse(input, &Rfc6265).ok(), Some(expected));
+}
+
+// RFC 6265 uses found flags: after the first syntactic match for a component,
+// later tokens for that component are ignored.
 #[rstest]
 #[case("06 Nov 1994 08:49:37 09:10:11", datetime!(1994-11-06 08:49:37 UTC))]
 #[case("Nov 1994 06 07 08:49:37", datetime!(1994-11-06 08:49:37 UTC))]
@@ -172,6 +188,54 @@ fn rfc_6265_first_matching_component_wins(
     #[case] expected: OffsetDateTime,
 ) {
     assert_eq!(OffsetDateTime::parse(input, &Rfc6265).ok(), Some(expected));
+}
+
+// A syntactic match sets the found flag even if a later range check rejects the
+// value. The parser must not recover by using a later valid token.
+#[rstest]
+#[case("32 06 Nov 1994 08:49:37", "day")]
+#[case("00 06 Nov 1994 08:49:37", "day")]
+#[case("24:00:00 08:00:00 06 Nov 1994", "hour")]
+#[case("1600 1994 06 Nov 08:49:37", "year")]
+fn rfc_6265_invalid_first_matching_component_wins(
+    #[case] input: &str,
+    #[case] component_name: &str,
+) {
+    assert!(matches!(
+        OffsetDateTime::parse(input, &Rfc6265),
+        Err(error::Parse::ParseFromDescription(
+            error::ParseFromDescription::InvalidComponent(name)
+        )) if name == component_name
+    ));
+}
+
+// The RFC checks day before year. A two-digit numeric token can therefore be a
+// day even when it would also be a syntactically valid year token.
+#[rstest]
+#[case("Nov 70 06 08:49:37", "day")]
+fn rfc_6265_day_precedes_year_for_ambiguous_numeric_tokens(
+    #[case] input: &str,
+    #[case] component_name: &str,
+) {
+    assert!(matches!(
+        OffsetDateTime::parse(input, &Rfc6265),
+        Err(error::Parse::ParseFromDescription(
+            error::ParseFromDescription::InvalidComponent(name)
+        )) if name == component_name
+    ));
+}
+
+// The algorithm processes complete date-tokens. It does not search inside one
+// token for additional productions after a match.
+#[rstest]
+#[case("06Nov 1994 08:49:37", "month")]
+fn rfc_6265_does_not_search_inside_tokens(#[case] input: &str, #[case] component_name: &str) {
+    assert!(matches!(
+        OffsetDateTime::parse(input, &Rfc6265),
+        Err(error::Parse::ParseFromDescription(
+            error::ParseFromDescription::InvalidComponent(name)
+        )) if name == component_name
+    ));
 }
 
 #[rstest]
@@ -186,6 +250,8 @@ fn rfc_6265_time(#[case] input: &str, #[case] expected: Time) {
     assert_eq!(Time::parse(input, &Rfc6265).ok(), Some(expected));
 }
 
+// These cases cover missing fields, digit widths that do not match the
+// productions, and scalar values rejected by the post-scan range checks.
 #[rstest]
 #[case("Sun, 06 Nov 1994 GMT", "hour")]
 #[case("Sun, Nov 1994 08:49:37 GMT", "day")]
@@ -193,8 +259,19 @@ fn rfc_6265_time(#[case] input: &str, #[case] expected: Time) {
 #[case("Sun, 06 Nov 08:49:37 GMT", "year")]
 #[case("Sun, 06 Nov 1600 08:49:37 GMT", "year")]
 #[case("Sun, 06 Nov 0100 08:49:37 GMT", "year")]
+#[case("Sun, 06 Nov 999 08:49:37 GMT", "year")]
+#[case("Sun, 06 Nov 9 08:49:37 GMT", "year")]
+#[case("Sun, 06 Nov 19945 08:49:37 GMT", "year")]
 #[case("Sun, 00 Nov 1994 08:49:37 GMT", "day")]
+#[case("Sun, 006 Nov 1994 08:49:37 GMT", "day")]
 #[case("Sun, 32 Nov 1994 08:49:37 GMT", "day")]
+#[case("Sun, 06 Nov 1994 08 GMT", "hour")]
+#[case("Sun, 06 Nov 1994 08:49 GMT", "hour")]
+#[case("Sun, 06 Nov 1994 08::37 GMT", "hour")]
+#[case("Sun, 06 Nov 1994 08:49: GMT", "hour")]
+#[case("Sun, 06 Nov 1994 008:49:37 GMT", "hour")]
+#[case("Sun, 06 Nov 1994 08:049:37 GMT", "hour")]
+#[case("Sun, 06 Nov 1994 08:49:037 GMT", "hour")]
 #[case("Sun, 06 Nov 1994 24:49:37 GMT", "hour")]
 #[case("Sun, 06 Nov 1994 08:60:37 GMT", "minute")]
 #[case("Sun, 06 Nov 1994 08:49:60 GMT", "second")]
@@ -205,6 +282,74 @@ fn rfc_6265_err_invalid_component(#[case] input: &str, #[case] component_name: &
             error::ParseFromDescription::InvalidComponent(name)
         )) if name == component_name
     ));
+}
+
+#[test]
+fn rfc_6265_delimiters() {
+    let delimiters = [b'\t']
+        .into_iter()
+        .chain(0x20..=0x2F)
+        .chain(0x3B..=0x40)
+        .chain(0x5B..=0x60)
+        .chain(0x7B..=0x7E);
+
+    for delimiter in delimiters {
+        let input = format!(
+            "08:49:37{0}06{0}Nov{0}1994",
+            char::from(delimiter)
+        );
+        assert_eq!(
+            OffsetDateTime::parse(&input, &Rfc6265).ok(),
+            Some(datetime!(1994-11-06 08:49:37 UTC)),
+            "delimiter {delimiter:#04x}"
+        );
+    }
+}
+
+// Cover representative non-delimiter ranges outside alphanumeric and colon:
+// NUL/control bytes, DEL, and non-ASCII bytes remain inside date-tokens.
+#[test]
+fn rfc_6265_non_delimiters_remain_in_tokens() {
+    assert_eq!(
+        OffsetDateTime::parse(
+            "06\0\n\u{1f}zz Nov\u{80}junk 1994abc 08:49:37\u{7f}zz",
+            &Rfc6265
+        )
+        .ok(),
+        Some(datetime!(1994-11-06 08:49:37 UTC))
+    );
+}
+
+// The month production is a case-insensitive three-letter prefix followed by
+// arbitrary trailing octets, but all canonical prefixes should still map
+// correctly.
+#[rstest]
+#[case("01 Jan 1994 08:49:37", datetime!(1994-01-01 08:49:37 UTC))]
+#[case("01 Feb 1994 08:49:37", datetime!(1994-02-01 08:49:37 UTC))]
+#[case("01 Mar 1994 08:49:37", datetime!(1994-03-01 08:49:37 UTC))]
+#[case("01 Apr 1994 08:49:37", datetime!(1994-04-01 08:49:37 UTC))]
+#[case("01 May 1994 08:49:37", datetime!(1994-05-01 08:49:37 UTC))]
+#[case("01 Jun 1994 08:49:37", datetime!(1994-06-01 08:49:37 UTC))]
+#[case("01 Jul 1994 08:49:37", datetime!(1994-07-01 08:49:37 UTC))]
+#[case("01 Aug 1994 08:49:37", datetime!(1994-08-01 08:49:37 UTC))]
+#[case("01 Sep 1994 08:49:37", datetime!(1994-09-01 08:49:37 UTC))]
+#[case("01 Oct 1994 08:49:37", datetime!(1994-10-01 08:49:37 UTC))]
+#[case("01 Nov 1994 08:49:37", datetime!(1994-11-01 08:49:37 UTC))]
+#[case("01 Dec 1994 08:49:37", datetime!(1994-12-01 08:49:37 UTC))]
+fn rfc_6265_month_names(#[case] input: &str, #[case] expected: OffsetDateTime) {
+    assert_eq!(OffsetDateTime::parse(input, &Rfc6265).ok(), Some(expected));
+}
+
+// Trailing month digits and repeated leading/trailing delimiters are valid
+// token-boundary behavior under RFC 6265.
+#[rstest]
+#[case("06 Nov123 1994 08:49:37", datetime!(1994-11-06 08:49:37 UTC))]
+#[case(";;; 08:49:37 /// 06 @@@ Nov [[[ 1994 ;;;", datetime!(1994-11-06 08:49:37 UTC))]
+fn rfc_6265_permissive_token_boundaries(
+    #[case] input: &str,
+    #[case] expected: OffsetDateTime,
+) {
+    assert_eq!(OffsetDateTime::parse(input, &Rfc6265).ok(), Some(expected));
 }
 
 #[rstest]

@@ -829,6 +829,8 @@ impl sealed::Sealed for Rfc6265 {
             value.offset_minute(state).get(),
             value.offset_second(state).get(),
         )?;
+        // `sane-cookie-date` is emitted in GMT, so derive the weekday, date,
+        // and time after converting the supplied offset date-time to UTC.
         let utc = OffsetDateTime::new_in_offset(date, time, offset)
             .checked_to_utc()
             .ok_or(error::Format::InvalidComponent("offset"))?;

@@ -14,14 +14,13 @@ use num_conv::prelude::*;
 
 use crate::error::ParseFromDescription::InvalidComponent;
 use crate::error::TryFromParsed;
+use crate::format_description::modifier;
+use crate::parsing::combinator::{ascii_char, one_or_two_digits};
+use crate::parsing::{ParsedItem, component};
 use crate::{Date, Month, OffsetDateTime, Time, UtcOffset, error};
 
 pub(crate) fn invalid_component(name: &'static str) -> error::Parse {
     error::Parse::ParseFromDescription(InvalidComponent(name))
-}
-
-fn component_range(err: error::ComponentRange) -> error::Parse {
-    error::Parse::TryFromParsed(TryFromParsed::ComponentRange(err))
 }
 
 #[derive(Default)]
@@ -53,78 +52,41 @@ fn ends_at_non_digit(input: &[u8], index: usize) -> bool {
     }
 }
 
-fn parse_one_or_two_digits_at(input: &[u8], index: usize) -> Option<(u8, usize)> {
-    let first = input.get(index).copied()?;
-    if !first.is_ascii_digit() {
-        return None;
-    }
-
-    let mut value = first - b'0';
-    let mut index = index + 1;
-
-    if let Some(second) = input.get(index).copied()
-        && second.is_ascii_digit()
-    {
-        value = value * 10 + second - b'0';
-        index += 1;
-    }
-
-    Some((value, index))
-}
-
 fn parse_time(input: &[u8]) -> Option<(u8, u8, u8)> {
     // time = hms-time [ non-digit *OCTET ], after RFC Errata 4148. Each hms
     // component is 1*2 DIGIT.
     // Range validation is deliberately later, matching the RFC's sequence of
     // first finding components and then rejecting invalid parsed values.
-    let (hour, input_index) = parse_one_or_two_digits_at(input, 0)?;
-    if input.get(input_index) != Some(&b':') {
-        return None;
-    }
-
-    let (minute, input_index) = parse_one_or_two_digits_at(input, input_index + 1)?;
-    if input.get(input_index) != Some(&b':') {
-        return None;
-    }
-
-    let (second, input_index) = parse_one_or_two_digits_at(input, input_index + 1)?;
-    ends_at_non_digit(input, input_index).then_some((hour, minute, second))
+    let ParsedItem(input, hour) = one_or_two_digits(input)?;
+    let input = ascii_char::<b':'>(input)?.into_inner();
+    let ParsedItem(input, minute) = one_or_two_digits(input)?;
+    let input = ascii_char::<b':'>(input)?.into_inner();
+    let ParsedItem(input, second) = one_or_two_digits(input)?;
+    ends_at_non_digit(input, 0).then_some((hour, minute, second))
 }
 
+/// Parse the RFC 6265 day-of-month production without applying the day range check.
+///
+/// The RFC records the first syntactic day token before it rejects `0` in the
+/// later range checks. Using `component::parse_day` here would reject `0` too
+/// early and allow a later numeric token to become the day.
 fn parse_day(input: &[u8]) -> Option<u8> {
     // day-of-month = 1*2 DIGIT [ non-digit *OCTET ], after RFC Errata 4148.
-    let (day, input_index) = parse_one_or_two_digits_at(input, 0)?;
-    ends_at_non_digit(input, input_index).then_some(day)
+    let ParsedItem(input, day) = one_or_two_digits(input)?;
+    ends_at_non_digit(input, 0).then_some(day)
 }
 
+/// Parse the RFC 6265 month production using the shared short-month parser.
+///
+/// RFC ABNF string literals are case-insensitive, and the production permits
+/// arbitrary trailing octets after the three-letter month prefix. The shared
+/// parser returns those trailing bytes as the remainder; RFC 6265 requires that
+/// remainder to be ignored.
 fn parse_month(input: &[u8]) -> Option<Month> {
-    // month = month-name *OCTET. RFC ABNF string literals are
-    // case-insensitive, so the three-letter prefix determines the month after
-    // ASCII case folding. Additional trailing octets stay inside the same token
-    // and are ignored by the production.
-    let [a, b, c, ..] = input else {
-        return None;
+    let modifiers = modifier::MonthShort {
+        case_sensitive: false,
     };
-
-    match (
-        a.to_ascii_lowercase(),
-        b.to_ascii_lowercase(),
-        c.to_ascii_lowercase(),
-    ) {
-        (b'j', b'a', b'n') => Some(Month::January),
-        (b'f', b'e', b'b') => Some(Month::February),
-        (b'm', b'a', b'r') => Some(Month::March),
-        (b'a', b'p', b'r') => Some(Month::April),
-        (b'm', b'a', b'y') => Some(Month::May),
-        (b'j', b'u', b'n') => Some(Month::June),
-        (b'j', b'u', b'l') => Some(Month::July),
-        (b'a', b'u', b'g') => Some(Month::August),
-        (b's', b'e', b'p') => Some(Month::September),
-        (b'o', b'c', b't') => Some(Month::October),
-        (b'n', b'o', b'v') => Some(Month::November),
-        (b'd', b'e', b'c') => Some(Month::December),
-        _ => None,
-    }
+    component::parse_month_short(input, modifiers).map(|item| item.1)
 }
 
 fn parse_year(input: &[u8]) -> Option<i32> {
@@ -168,9 +130,11 @@ pub(crate) fn parse(input: &[u8]) -> Result<OffsetDateTime, error::Parse> {
     {
         // Section 5.1.1 checks productions in this order: time, day, month,
         // year. Once a token matches a production, the RFC says to skip the
-        // remaining sub-steps and continue to the next token. This is why
-        // unrelated tokens such as weekday names and time zone labels are
-        // ignored rather than rejected.
+        // remaining sub-steps and continue to the next token. That syntactic
+        // match sets the found flag even if a later range check rejects the
+        // value, so the parser must not recover by using a later token for the
+        // same component. Unrelated tokens such as weekday names and time zone
+        // labels are ignored rather than rejected.
         if parsed.time.is_none()
             && let Some(time) = parse_time(token)
         {
@@ -223,8 +187,10 @@ pub(crate) fn parse(input: &[u8]) -> Result<OffsetDateTime, error::Parse> {
         return Err(invalid_component("second"));
     }
 
-    let date = Date::from_calendar_date(year, month, day).map_err(component_range)?;
-    let time = Time::from_hms(hour, minute, second).map_err(component_range)?;
+    let date = Date::from_calendar_date(year, month, day)
+        .map_err(|err| error::Parse::TryFromParsed(TryFromParsed::ComponentRange(err)))?;
+    let time = Time::from_hms(hour, minute, second)
+        .map_err(|err| error::Parse::TryFromParsed(TryFromParsed::ComponentRange(err)))?;
 
     // The final step says to let parsed-cookie-date be the resulting date in UTC.
     Ok(OffsetDateTime::new_in_offset(date, time, UtcOffset::UTC))

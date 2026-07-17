@@ -310,6 +310,9 @@ impl sealed::Sealed for Rfc6265 {
         parsed: &mut Parsed,
         _: PrivateMethod,
     ) -> Result<&'a [u8], error::Parse> {
+        // Keep the RFC 6265 token algorithm centralized in the internal parser,
+        // then copy the validated UTC result into the generic `Parsed`
+        // representation used by the public parsing APIs.
         let date_time = rfc6265::parse(input)?;
         let (year, month, day) = date_time.to_calendar_date();
 
@@ -342,23 +345,6 @@ impl sealed::Sealed for Rfc6265 {
             .ok_or_else(|| rfc6265::invalid_component("offset second"))?;
 
         Ok(&input[input.len()..])
-    }
-
-    fn parse_offset_date_time(
-        &self,
-        input: &[u8],
-        defaults: Option<Parsed>,
-        _: PrivateMethod,
-    ) -> Result<OffsetDateTime, error::Parse> {
-        if defaults.is_some() {
-            crate::hint::cold_path();
-            return self
-                .parse_internal(input, defaults, PrivateMethod)?
-                .try_into()
-                .map_err(error::Parse::TryFromParsed);
-        }
-
-        rfc6265::parse(input)
     }
 }
 
